@@ -1,0 +1,141 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Clone Repository') {
+            steps {
+                git credentialsId: 'GitHub', url: 'https://github.com/cyb-swap/shop-app.git'
+            }
+        }
+
+        stage('Dependency-Check') {
+            steps {
+                dependencyCheck additionalArguments: '--nvdApiKey 2a6b167d-8721-4fd6-878c-dc4a156434f7', odcInstallation: 'dep-check-auto'
+                dependencyCheckPublisher pattern: ''
+                archiveArtifacts allowEmptyArchive: true, artifacts: 'dependency-check-report.xml', fingerprint: true, followSymlinks: false, onlyIfSuccessful: true
+                sh ' rm -rf dependency-check-report.xml*'
+            }
+        }
+        
+        stage('Build Docker Images') {
+            steps {
+                script {
+                    def images = [
+                        ["name": "luffymonkey1/shop_app_app:latest", "path": "app"],
+                        ["name": "luffymonkey1/shop_app_database:latest", "path": "database"],
+                        ["name": "luffymonkey1/shop_app_payment_gateway:latest", "path": "payment_gateway"],
+                        ["name": "luffymonkey1/shop_app_reverse_proxy:latest", "path": "reverse_proxy"]
+                    ]
+                    
+                    for (img in images) {
+                        echo "Building Docker image: ${img.name}"
+                        docker.build(img.name, img.path)
+                    }
+                }
+            }
+        }
+/*         
+        stage('Docker Push') {
+            steps {
+                script {
+                    // Use withCredentials to handle Docker Hub credentials securely
+                    withCredentials([usernamePassword(credentialsId: 'dockerHub', passwordVariable: 'dockerHubPassword', usernameVariable: 'dockerHubUser')]) {
+                        // Login to Docker Hub
+                        sh "docker login -u ${env.dockerHubUser} -p ${env.dockerHubPassword}"
+                        
+                        // List of built images to push
+                        def images = [
+                            "luffymonkey1/shop_app_app:latest",
+                            "luffymonkey1/shop_app_database:latest",
+                            "luffymonkey1/shop_app_payment_gateway:latest",
+                            "luffymonkey1/shop_app_reverse_proxy:latest"
+                        ]
+                        
+                        // Push each image to Docker Hub
+                        for (img in images) {
+                            echo "Pushing Docker image: ${img}"
+                            sh "docker push ${img}"
+                        }
+                    }
+                }
+            }
+        }
+*/
+        stage('Container Security') {
+            steps {
+                script {
+                    // List of built images to scan
+                    def images = [
+                        ["name": "luffymonkey1/shop_app_app:latest", "path": "app"],
+                        ["name": "luffymonkey1/shop_app_database:latest", "path": "database"],
+                        ["name": "luffymonkey1/shop_app_payment_gateway:latest", "path": "payment_gateway"],
+                        ["name": "luffymonkey1/shop_app_reverse_proxy:latest", "path": "reverse_proxy"]
+                    ]
+                    
+                    for (img in images) {
+                        try {
+                            // Run the Grype scan and redirect output to grype.txt
+                            sh "grype ${img.name} > ${img.path}_grype.txt"
+                
+                            // Archive the grype output regardless of success
+                            archiveArtifacts allowEmptyArchive: true, artifacts: "${img.path}_grype.txt", fingerprint: true, followSymlinks: false
+                            
+                            // Read the vulnerabilities from the output file
+                            def vulnerabilities = readFile("${img.path}_grype.txt")
+                            echo "Grype Scan Output:\n${vulnerabilities}"
+                            
+                            // Check if vulnerabilities were found and fail the build if necessary
+                            if (vulnerabilities.contains('vulnerable')) {
+                                error("Vulnerabilities found in ${img.name}!")
+                            }
+                        } catch (Exception e) {
+                            // Catch the exception and echo the error message
+                            echo "Grype scan failed: ${e.message}"
+                            
+                            // Archive the output even if the Grype command fails
+                            archiveArtifacts allowEmptyArchive: true, artifacts: "${img.path}_grype.txt", fingerprint: true, followSymlinks: false
+                            
+                            // Mark the build as unstable
+                            currentBuild.result = 'UNSTABLE'
+                        } finally {
+                            // Cleanup the output file after processing
+                            sh "rm -rf ${img.path}_grype.txt"
+                        }
+                    }
+                }
+            }
+        }       
+         
+        stage('SCA') {
+            steps {
+                script{
+                    dir('app/react-app') {
+                        sh 'yarn install'
+                        snykSecurity(
+                            snykInstallation: 'snyk',
+                            snykTokenId: '59e68e07-6d49-416b-a4f3-ba4523a0f631',
+                            failOnIssues: false,
+                        )
+                    }
+                }
+            }
+        }
+        
+        stage('Run Docker Compose') {
+            steps {
+                script {
+                    sh 'docker-compose up -d'
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                sh 'docker-compose down'
+            }
+            cleanWs()
+        }
+    }
+}
